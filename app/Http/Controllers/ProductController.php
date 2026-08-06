@@ -2,452 +2,472 @@
 
 namespace App\Http\Controllers;
 
-use Illuminate\Http\Request;
 use App\Models\Product;
+use App\Models\ProductMedia;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+use Intervention\Image\ImageManager;
+use Intervention\Image\Drivers\Gd\Driver;
+use App\Http\Resources\ProductResource;
 
 class ProductController extends Controller
 {
-    // ============================================================
-    //  WEB ROUTES METHODS (For Blade Views - Admin Panel)
-    // ============================================================
-
-    /**
-     * DISPLAY ALL PRODUCTS LIST
-     * 
-     * This method fetches all products from database and shows them in index view
-     * latest() = Orders by 'created_at' column DESC (newest first)
-     */
     public function index()
     {
-        $products = Product::latest()->get(); 
-        // get() = Returns collection of all matching records
+        $products = Product::latest()->get();
         return view('products.index', compact('products'));
-        // compact('products') = Passes $products variable to Blade view
     }
 
-    /**
-     * SHOW CREATE PRODUCT FORM
-     * 
-     * Empty method - just returns the create form view
-     * Form will have input fields for all product data
-     */
     public function create()
     {
         return view('products.create');
     }
 
-    /**
-     *  CREATE NEW PRODUCT (Store Method)
-     * 
-     * 1. Validates input data
-     * 2. Handles image upload to public/image folder
-     * 3. Saves product record to database
-     * 4. Redirects to products list
-     */
     public function store(Request $request)
     {
-        // ========================================
-        //  STEP 1: VALIDATE INPUT DATA
-        // ========================================
         $request->validate([
-            'product_name' => 'required|min:3|max:255',        // Required, 3-255 chars
-            'details'      => 'required|min:10',               // Required, min 10 chars
-            'image'        => 'nullable|image|mimes:jpg,png,jpeg|max:2048', // Optional image, 2MB max
-            'size'         => 'required',                      // Required field
-            'color'        => 'required',                      // Required field
-            'category'     => 'required',                      // Required field
+            'product_name' => 'required|min:3|max:255',
+            'details' => 'required|min:10',
+            'size' => 'required',
+            'color' => 'required',
+            'category' => 'required',
+            'files.*' => 'nullable|file|max:10240',
+            'base64_files' => 'nullable|string',
         ]);
 
-        $imageName = null; // Default: no image
+        $product = Product::create([
+            'product_name' => $request->product_name,
+            'details' => $request->details,
+            'size' => $request->size,
+            'color' => $request->color,
+            'category' => $request->category,
+            'image' => null,
+        ]);
 
-        // ========================================
-        //  STEP 2: IMAGE UPLOAD PROCESS (DETAILED)
-        // ========================================
-        if ($request->hasFile('image')) {
-            // CHECK 1: File exists in request?
-            // $request->image = Uploaded file object
-
-            // STEP 2.1: CREATE UNIQUE FILENAME
-            // Why unique? Prevent overwriting existing files
-            // Format: 1703123456_originalname.jpg
-            $imageName = time() . '_' . $request->image->getClientOriginalName();
-            // time() = Current timestamp (unix seconds)
-            // getClientOriginalName() = Original filename from user computer
-
-            // STEP 2.2: CREATE STORAGE FOLDER (if not exists)
-            $imagePath = public_path('image');
-            if (!file_exists($imagePath)) {
-                mkdir($imagePath, 0755, true);
+        if ($request->hasFile('files')) {
+            foreach ($request->file('files') as $index => $file) {
+                $this->storeMedia($product->id, $file, $index === 0);
             }
-
-            // STEP 2.3: MOVE FILE FROM TEMP TO PERMANENT LOCATION
-            // TEMP LOCATION: /tmp/php12345 (system temp)
-            // PERMANENT: /public/image/filename.jpg
-            $request->image->move(public_path('image'), $imageName);
-            
-            // ✅ SUCCESS! Image now at: http://yoursite.com/image/filename.jpg
         }
 
-        // ========================================
-        //  STEP 3: SAVE TO DATABASE
-        // ========================================
-        Product::create([
-            'product_name' => $request->product_name,
-            'details'      => $request->details,
-            'image'        => $imageName,  // Only filename stored (not full path)
-            'size'         => $request->size,
-            'color'        => $request->color,
-            'category'     => $request->category,
-        ]);
+        if ($request->base64_files) {
+            $base64Files = json_decode($request->base64_files, true);
+            if (is_array($base64Files)) {
+                foreach ($base64Files as $index => $base64File) {
+                    $this->storeBase64Media($product->id, $base64File, $index === 0);
+                }
+            }
+        }
 
-        // ========================================
-        //  STEP 4: REDIRECT WITH SUCCESS MESSAGE
-        // ========================================
         return redirect()->route('products.index')
             ->with('success', 'Product Created Successfully');
     }
 
-    /**
-     *  SHOW EDIT FORM
-     * 
-     * Route Model Binding: Laravel automatically finds Product by ID
-     * $product = Product with ID from URL
-     */
     public function edit(Product $product)
     {
         return view('products.edit', compact('product'));
     }
 
-    /**
-     *  UPDATE EXISTING PRODUCT
-     * 
-     * 1. Keep existing image OR upload new one
-     * 2. Delete old image if new one uploaded
-     * 3. Update database record
-     */
     public function update(Request $request, Product $product)
     {
-        // Start with existing image name
+        $request->validate([
+            'product_name' => 'required|min:3|max:255',
+            'details' => 'required|min:10',
+            'size' => 'required',
+            'color' => 'required',
+            'category' => 'required',
+            'files.*' => 'nullable|file|max:10240',
+            'base64_files' => 'nullable|string',
+            'remove_media' => 'nullable|array',
+        ]);
+
         $imageName = $product->image;
 
-        // ========================================
-        //  NEW IMAGE UPLOADED? REPLACE OLD ONE
-        // ========================================
         if ($request->hasFile('image')) {
-            // DELETE OLD IMAGE (Free up storage space)
             $oldImagePath = public_path('image/' . $product->image);
             if ($product->image && file_exists($oldImagePath)) {
-                unlink($oldImagePath); // Remove file from server
+                unlink($oldImagePath);
             }
-
-            // SAVE NEW IMAGE (Same process as store())
             $imageName = time() . '_' . $request->image->getClientOriginalName();
             $request->image->move(public_path('image'), $imageName);
         }
 
-        // ========================================
-        //  UPDATE DATABASE
-        // ========================================
         $product->update([
             'product_name' => $request->product_name,
-            'details'      => $request->details,
-            'image'        => $imageName,
-            'size'         => $request->size,
-            'color'        => $request->color,
-            'category'     => $request->category,
+            'details' => $request->details,
+            'image' => $imageName,
+            'size' => $request->size,
+            'color' => $request->color,
+            'category' => $request->category,
         ]);
+
+        if ($request->hasFile('files')) {
+            foreach ($request->file('files') as $file) {
+                $this->storeMedia($product->id, $file);
+            }
+        }
+
+        if ($request->base64_files) {
+            $base64Files = json_decode($request->base64_files, true);
+            if (is_array($base64Files)) {
+                foreach ($base64Files as $base64File) {
+                    $this->storeBase64Media($product->id, $base64File);
+                }
+            }
+        }
+
+        if ($request->remove_media) {
+            foreach ($request->remove_media as $mediaId) {
+                $media = ProductMedia::where('product_id', $product->id)->where('id', $mediaId)->first();
+                if ($media) {
+                    Storage::disk('public')->delete(str_replace('app/public/', '', $media->file_path));
+                    if ($media->thumbnail_path) {
+                        Storage::disk('public')->delete(str_replace('app/public/', '', $media->thumbnail_path));
+                    }
+                    $media->delete();
+                }
+            }
+        }
 
         return redirect()->route('products.index')
             ->with('success', 'Product Updated Successfully');
     }
 
-    /**
-     *  DELETE PRODUCT + IMAGE
-     * 
-     * 1. Delete image file from server
-     * 2. Delete database record
-     */
     public function destroy(Product $product)
     {
-        // Delete image file first
         $imagePath = public_path('image/' . $product->image);
         if ($product->image && file_exists($imagePath)) {
             unlink($imagePath);
         }
 
-        // Delete database record
+        foreach ($product->media as $media) {
+            Storage::disk('public')->delete(str_replace('app/public/', '', $media->file_path));
+            if ($media->thumbnail_path) {
+                Storage::disk('public')->delete(str_replace('app/public/', '', $media->thumbnail_path));
+            }
+        }
+
+        $product->media()->delete();
         $product->delete();
 
         return redirect()->route('products.index')
             ->with('success', 'Product Deleted Successfully');
     }
 
-   // ============================================================
-//  API METHODS (JSON Responses for Mobile Apps/Postman)
-// ============================================================
-
-/**
- *  API: GET ALL PRODUCTS
- * 
- * URL: GET /api/products
- * 
- * Response:
- * {
- *   "status": true,
- *   "data": [ {products array} ]
- * }
- * 
- * Returns all products ordered by newest first (latest()->get())
- * No image upload - just database query
- */
-public function apiIndex(Request $request)
-{
-    $products = Product::latest()->get();
-    return response()->json([
-        'status' => true,
-        'data' => $products
-    ]);
-}
-
-/**
- *  API: CREATE NEW PRODUCT
- * 
- * URL: POST /api/products
- * Headers: Content-Type: multipart/form-data
- * 
- * Request Body (Form Data):
- * - product_name (required)
- * - details (required) 
- * - image (optional file)
- * - size (required)
- * - color (required)
- * - category (required)
- * 
- * ========================================
- * COMPLETE IMAGE UPLOAD PROCESS:
- * ========================================
- * 1. Client sends image file via POST
- * 2. Laravel stores in TEMP: /tmp/phpXXXXX.jpg
- * 3. Validate: image|mimes:jpg,png,jpeg|max:2048 (2MB)
- * 4. Generate unique name: time()_original.jpg
- * 5. Move to PERMANENT: public/image/newname.jpg
- * 6. Save filename to database
- * 7. Image accessible: http://yoursite.com/image/filename.jpg
- */
-public function apiStore(Request $request)
-{
-    // STEP 1: VALIDATE ALL FIELDS
-    $request->validate([
-        'product_name' => 'required|min:3|max:255',     // Name validation
-        'details'      => 'required|min:10',            // Description min 10 chars
-        'image'        => 'nullable|image|mimes:jpg,png,jpeg|max:2048', // Image rules
-        'size'         => 'required',                   // Size required
-        'color'        => 'required',                   // Color required
-        'category'     => 'required',                   // Category required
-    ]);
-
-    $imageName = null; // Default: no image
-
-    // ========================================
-    //  STEP 2: IMAGE UPLOAD & STORAGE (DETAILED)
-    // ========================================
-    if ($request->hasFile('image')) {
-        // CHECK: Does request contain image file?
-        // $request->image = UploadedFile object
-
-        // 2.1: GENERATE UNIQUE FILENAME
-        // Prevents overwriting: 1703123456_lipstick.jpg
-        $imageName = time() . '_' . $request->image->getClientOriginalName();
-        
-        // 2.2: ENSURE FOLDER EXISTS
-        $storagePath = public_path('image');
-        if (!file_exists($storagePath)) {
-            mkdir($storagePath, 0755, true);
+    public function apiIndex(Request $request)
+    {
+        $query = Product::query();
+        if ($request->has('search')) {
+            $query->where('product_name', 'like', '%' . $request->search . '%');
         }
-        
-        // 2.3: MOVE FROM TEMPORARY → PUBLIC FOLDER
-        // TEMP: /tmp/phpABCD1234 (auto-deleted)
-        // PUBLIC: /public/image/1703123456_lipstick.jpg
-        $request->image->move(public_path('image'), $imageName);
-        
-        //  IMAGE READY! URL: http://yoursite.com/image/1703123456_lipstick.jpg
-    }
-
-    // ========================================
-    //  STEP 3: CREATE DATABASE RECORD
-    // ========================================
-    $product = Product::create([
-        'product_name' => $request->product_name,
-        'details'      => $request->details,
-        'image'        => $imageName,  // Only filename (not full path)
-        'size'         => $request->size,
-        'color'        => $request->color,
-        'category'     => $request->category,
-    ]);
-
-    // ========================================
-    //  STEP 4: JSON RESPONSE
-    // ========================================
-    return response()->json([
-        'status' => true,
-        'message' => 'Product Created Successfully',
-        'data' => $product
-    ], 201); // HTTP 201 = Resource Created
-}
-
-/**
- *  API: SHOW SINGLE PRODUCT
- * 
- * URL: GET /api/products/{id}
- * 
- * No image upload - just retrieve from database
- * Returns product data including image filename
- * 
- * Response if not found:
- * {
- *   "status": false,
- *   "message": "Product Not Found"
- * }
- */
-public function apiShow($id)
-{
-    $product = Product::find($id); // Find by primary key
-
-    if (!$product) {
+        if ($request->has('category')) {
+            $query->where('category', $request->category);
+        }
+        if ($request->has('sort')) {
+            $query->orderBy('product_name', $request->sort);
+        } else {
+            $query->latest();
+        }
+        $products = $query->paginate($request->per_page ?? 15);
         return response()->json([
-            'status' => false,
-            'message' => 'Product Not Found'
-        ], 404); // HTTP 404 = Not Found
+            'status' => true,
+            'data' => ProductResource::collection($products),
+        ]);
     }
 
-    return response()->json([
-        'status' => true,
-        'data' => $product
-    ]);
-}
+    public function apiStore(Request $request)
+    {
+        $request->validate([
+            'product_name' => 'required|min:3|max:255',
+            'details' => 'required|min:10',
+            'size' => 'required',
+            'color' => 'required',
+            'category' => 'required',
+            'image' => 'nullable|image|mimes:jpg,png,jpeg,gif,webp,svg|max:10240',
+            'files.*' => 'nullable|file|max:10240',
+            'base64_files' => 'nullable|string',
+        ]);
 
-/**
- *  API: UPDATE PRODUCT
- * 
- * URL: PUT /api/products/{id} or PATCH /api/products/{id}
- * Headers: Content-Type: multipart/form-data
- * 
- * Request Body (Form Data):
- * - product_name (optional - uses ?? null coalescing)
- * - details (optional)
- * - image (optional - replaces old image)
- * - size, color, category (optional)
- * 
- * ========================================
- * IMAGE UPDATE PROCESS:
- * ========================================
- * 1. Keep existing image by default
- * 2. If NEW image uploaded:
- *    a. DELETE old image file
- *    b. Save new image with unique name
- *    c. Update database with new filename
- */
-public function apiUpdate(Request $request, $id)
-{
-    // STEP 1: FIND PRODUCT
-    $product = Product::find($id);
-
-    if (!$product) {
-        return response()->json([
-            'status' => false,
-            'message' => 'Product Not Found'
-        ], 404);
-    }
-
-    // STEP 2: SET EXISTING IMAGE AS DEFAULT
-    $imageName = $product->image; // Keep old image initially
-
-    // ========================================
-    //  STEP 3: NEW IMAGE? REPLACE OLD ONE
-    // ========================================
-    if ($request->hasFile('image')) {
-        // 3.1: DELETE OLD IMAGE FILE
-        $oldImagePath = public_path('image/' . $product->image);
-        if ($product->image && file_exists($oldImagePath)) {
-            unlink($oldImagePath); // Remove from server
-            // Prevents storage bloat from unused images
+        $imageName = null;
+        if ($request->hasFile('image')) {
+            $imageName = time() . '_' . $request->image->getClientOriginalName();
+            $request->image->move(public_path('image'), $imageName);
         }
 
-        // 3.2: SAVE NEW IMAGE (Same as apiStore)
-        $imageName = time() . '_' . $request->image->getClientOriginalName();
-        $request->image->move(public_path('image'), $imageName);
-        
-        // ✅ New image replaces old one completely
-    }
+        $product = Product::create([
+            'product_name' => $request->product_name,
+            'details' => $request->details,
+            'image' => $imageName,
+            'size' => $request->size,
+            'color' => $request->color,
+            'category' => $request->category,
+        ]);
 
-    // ========================================
-    //  STEP 4: UPDATE DATABASE
-    // ========================================
-    // ?? = Null coalescing: use new value OR keep old value
-    $product->update([
-        'product_name' => $request->product_name ?? $product->product_name,
-        'details'      => $request->details ?? $product->details,
-        'image'        => $imageName,
-        'size'         => $request->size ?? $product->size,
-        'color'        => $request->color ?? $product->color,
-        'category'     => $request->category ?? $product->category,
-    ]);
+        if ($request->hasFile('files')) {
+            foreach ($request->file('files') as $index => $file) {
+                $this->storeMedia($product->id, $file, $index === 0);
+            }
+        }
 
-    // ========================================
-    //  STEP 5: RETURN UPDATED DATA
-    // ========================================
-    return response()->json([
-        'status' => true,
-        'message' => 'Product Updated Successfully',
-        'data' => $product->fresh() // Reload from DB with latest changes
-    ]);
-}
+        if ($request->base64_files) {
+            $base64Files = json_decode($request->base64_files, true);
+            if (is_array($base64Files)) {
+                foreach ($base64Files as $index => $base64File) {
+                    $this->storeBase64Media($product->id, $base64File, $index === 0);
+                }
+            }
+        }
 
-/**
- *  API: DELETE PRODUCT
- * 
- * URL: DELETE /api/products/{id}
- * 
- * ========================================
- * COMPLETE DELETION PROCESS:
- * ========================================
- * 1. Find product by ID
- * 2. DELETE IMAGE FILE from public/image/
- * 3. DELETE DATABASE RECORD
- * 4. Return success response
- */
-public function apiDelete($id)
-{
-    // STEP 1: FIND PRODUCT
-    $product = Product::find($id);
-
-    if (!$product) {
         return response()->json([
-            'status' => false,
-            'message' => 'Product Not Found'
-        ], 404);
+            'status' => true,
+            'message' => 'Product Created Successfully',
+            'data' => new ProductResource($product->load('media')),
+        ], 201);
     }
 
-    // ========================================
-    //  STEP 2: DELETE IMAGE FILE
-    // ========================================
-    $imagePath = public_path('image/' . $product->image);
-    if ($product->image && file_exists($imagePath)) {
-        unlink($imagePath); // Remove physical file
-        // file_exists() = Safety check before delete
+    public function apiShow($id)
+    {
+        $product = Product::find($id);
+        if (!$product) {
+            return response()->json(['status' => false, 'message' => 'Product Not Found'], 404);
+        }
+        return response()->json(['status' => true, 'data' => new ProductResource($product->load('media'))]);
     }
 
-    // ========================================
-    //  STEP 3: DELETE DATABASE RECORD
-    // ========================================
-    $product->delete();
+    public function apiUpdate(Request $request, $id)
+    {
+        $product = Product::find($id);
+        if (!$product) {
+            return response()->json(['status' => false, 'message' => 'Product Not Found'], 404);
+        }
 
-    // ========================================
-    //  STEP 4: SUCCESS RESPONSE
-    // ========================================
-    return response()->json([
-        'status' => true,
-        'message' => 'Product Deleted Successfully'
-    ]);
-}
+        $request->validate([
+            'product_name' => 'nullable|min:3|max:255',
+            'details' => 'nullable|min:10',
+            'size' => 'nullable',
+            'color' => 'nullable',
+            'category' => 'nullable',
+            'image' => 'nullable|image|mimes:jpg,png,jpeg,gif,webp,svg|max:10240',
+            'files.*' => 'nullable|file|max:10240',
+            'base64_files' => 'nullable|string',
+            'remove_media' => 'nullable|array',
+        ]);
+
+        $imageName = $product->image;
+        if ($request->hasFile('image')) {
+            $oldImagePath = public_path('image/' . $product->image);
+            if ($product->image && file_exists($oldImagePath)) {
+                unlink($oldImagePath);
+            }
+            $imageName = time() . '_' . $request->image->getClientOriginalName();
+            $request->image->move(public_path('image'), $imageName);
+        }
+
+        $product->update([
+            'product_name' => $request->product_name ?? $product->product_name,
+            'details' => $request->details ?? $product->details,
+            'image' => $imageName,
+            'size' => $request->size ?? $product->size,
+            'color' => $request->color ?? $product->color,
+            'category' => $request->category ?? $product->category,
+        ]);
+
+        if ($request->hasFile('files')) {
+            foreach ($request->file('files') as $file) {
+                $this->storeMedia($product->id, $file);
+            }
+        }
+
+        if ($request->base64_files) {
+            $base64Files = json_decode($request->base64_files, true);
+            if (is_array($base64Files)) {
+                foreach ($base64Files as $base64File) {
+                    $this->storeBase64Media($product->id, $base64File);
+                }
+            }
+        }
+
+        if ($request->remove_media) {
+            foreach ($request->remove_media as $mediaId) {
+                $media = ProductMedia::where('product_id', $product->id)->where('id', $mediaId)->first();
+                if ($media) {
+                    Storage::disk('public')->delete(str_replace('app/public/', '', $media->file_path));
+                    if ($media->thumbnail_path) {
+                        Storage::disk('public')->delete(str_replace('app/public/', '', $media->thumbnail_path));
+                    }
+                    $media->delete();
+                }
+            }
+        }
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Product Updated Successfully',
+            'data' => new ProductResource($product->fresh()->load('media')),
+        ]);
+    }
+
+    public function apiDelete($id)
+    {
+        $product = Product::find($id);
+        if (!$product) {
+            return response()->json(['status' => false, 'message' => 'Product Not Found'], 404);
+        }
+
+        $imagePath = public_path('image/' . $product->image);
+        if ($product->image && file_exists($imagePath)) {
+            unlink($imagePath);
+        }
+
+        foreach ($product->media as $media) {
+            Storage::disk('public')->delete(str_replace('app/public/', '', $media->file_path));
+            if ($media->thumbnail_path) {
+                Storage::disk('public')->delete(str_replace('app/public/', '', $media->thumbnail_path));
+            }
+        }
+
+        $product->media()->delete();
+        $product->delete();
+
+        return response()->json(['status' => true, 'message' => 'Product Deleted Successfully']);
+    }
+
+    private function storeMedia($productId, $file, $isPrimary = false)
+    {
+        $allowedImages = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+        $allowedVideos = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'];
+        $allowedAudio = ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp3', 'audio/aac'];
+        $allowedDocs = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/zip', 'text/plain'];
+
+        $allMimes = array_merge($allowedImages, $allowedVideos, $allowedAudio, $allowedDocs);
+        $maxSize = 10 * 1024 * 1024;
+
+        if ($file->getSize() > $maxSize) {
+            return;
+        }
+
+        $mimeType = $file->getMimeType();
+        if (!in_array($mimeType, $allMimes)) {
+            return;
+        }
+
+        $disk = 'public';
+        $folder = 'products/' . $productId;
+        $fileName = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+        $filePath = $folder . '/' . $fileName;
+
+        Storage::disk($disk)->put($filePath, file_get_contents($file), 'public');
+
+        $fileType = 'image';
+        if (in_array($mimeType, $allowedVideos)) {
+            $fileType = 'video';
+        } elseif (in_array($mimeType, $allowedAudio)) {
+            $fileType = 'audio';
+        } elseif ($mimeType === 'application/pdf') {
+            $fileType = 'document';
+        }
+
+        $thumbnailPath = null;
+        if ($fileType === 'image') {
+            try {
+                $manager = new ImageManager(new Driver());
+                $image = $manager->decodePath(Storage::disk($disk)->path($filePath));
+                $thumbnail = $image->resize(300, 300, function ($constraint) {
+                    $constraint->aspectRatio();
+                    $constraint->upsize();
+                });
+                $thumbnailFileName = 'thumb_' . $fileName;
+                $thumbnailPath = $folder . '/' . $thumbnailFileName;
+                Storage::disk($disk)->put($thumbnailPath, (string) $thumbnail->encode());
+            } catch (\Exception $e) {
+                $thumbnailPath = null;
+            }
+        }
+
+        if ($isPrimary) {
+            ProductMedia::where('product_id', $productId)->update(['is_primary' => false]);
+        }
+
+        ProductMedia::create([
+            'product_id' => $productId,
+            'file_name' => $file->getClientOriginalName(),
+            'file_path' => 'app/public/' . $filePath,
+            'file_type' => $fileType,
+            'mime_type' => $mimeType,
+            'file_size' => $file->getSize(),
+            'thumbnail_path' => $thumbnailPath ? 'app/public/' . $thumbnailPath : null,
+            'is_primary' => $isPrimary,
+        ]);
+    }
+
+    private function storeBase64Media($productId, $base64File, $isPrimary = false)
+    {
+        $base64 = $base64File['base64'] ?? $base64File;
+        $fileName = $base64File['file_name'] ?? 'base64_image';
+        $mimeType = $base64File['mime_type'] ?? 'image/jpeg';
+        $altText = $base64File['alt_text'] ?? null;
+
+        if (preg_match('/^data:([a-zA-Z0-9\/\+]+);base64,/', $base64, $matches)) {
+            $mimeType = $matches[1];
+            $base64 = substr($base64, strpos($base64, ',') + 1);
+        }
+
+        $disk = 'public';
+        $folder = 'products/' . $productId;
+        $extension = explode('/', $mimeType)[1] ?? 'jpg';
+        if (in_array($extension, ['jpeg', 'jpg'])) {
+            $extension = 'jpg';
+        }
+        $fileName = time() . '_base64_' . uniqid() . '.' . $extension;
+        $filePath = $folder . '/' . $fileName;
+
+        $fileData = base64_decode($base64);
+        if ($fileData === false) {
+            return;
+        }
+
+        Storage::disk($disk)->put($filePath, $fileData, 'public');
+
+        $fileType = 'image';
+        if (str_starts_with($mimeType, 'video/')) {
+            $fileType = 'video';
+        } elseif (str_starts_with($mimeType, 'audio/')) {
+            $fileType = 'audio';
+        } elseif ($mimeType === 'application/pdf') {
+            $fileType = 'document';
+        }
+
+        $thumbnailPath = null;
+        if ($fileType === 'image') {
+            try {
+                $manager = new ImageManager(new Driver());
+                $image = $manager->decodePath(Storage::disk($disk)->path($filePath));
+                $thumbnail = $image->resize(300, 300, function ($constraint) {
+                    $constraint->aspectRatio();
+                    $constraint->upsize();
+                });
+                $thumbnailFileName = 'thumb_' . $fileName;
+                $thumbnailPath = $folder . '/' . $thumbnailFileName;
+                Storage::disk($disk)->put($thumbnailPath, (string) $thumbnail->encode());
+            } catch (\Exception $e) {
+                $thumbnailPath = null;
+            }
+        }
+
+        if ($isPrimary) {
+            ProductMedia::where('product_id', $productId)->update(['is_primary' => false]);
+        }
+
+        ProductMedia::create([
+            'product_id' => $productId,
+            'file_name' => $fileName,
+            'file_path' => 'app/public/' . $filePath,
+            'file_type' => $fileType,
+            'mime_type' => $mimeType,
+            'file_size' => strlen($fileData),
+            'thumbnail_path' => $thumbnailPath ? 'app/public/' . $thumbnailPath : null,
+            'alt_text' => $altText,
+            'is_primary' => $isPrimary,
+        ]);
+    }
 }
