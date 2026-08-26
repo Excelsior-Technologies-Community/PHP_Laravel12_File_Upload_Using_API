@@ -3,38 +3,23 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\ProductMediaController;
 
-
-/*
-|--------------------------------------------------------------------------
-| Product Media API Routes
-|--------------------------------------------------------------------------
-*/
-
 Route::prefix('products/{productId}/media')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Media Listing
+    | 1. LIST MEDIA
     |--------------------------------------------------------------------------
-    |
-    | Supports:
-    | search
-    | file_type
-    | is_primary
-    | sort_by
-    | sort_order
-    | per_page
-    | page
-    |
     */
+
     Route::get(
         '/',
         [ProductMediaController::class, 'index']
     );
 
+
     /*
     |--------------------------------------------------------------------------
-    | Upload
+    | 2. UPLOAD MULTIPLE
     |--------------------------------------------------------------------------
     */
 
@@ -43,9 +28,10 @@ Route::prefix('products/{productId}/media')->group(function () {
         [ProductMediaController::class, 'uploadMultiple']
     );
 
+
     /*
     |--------------------------------------------------------------------------
-    | Base64 Upload
+    | 3. BASE64 UPLOAD
     |--------------------------------------------------------------------------
     */
 
@@ -54,9 +40,34 @@ Route::prefix('products/{productId}/media')->group(function () {
         [ProductMediaController::class, 'uploadBase64']
     );
 
+
     /*
     |--------------------------------------------------------------------------
-    | Download
+    | 4. MEDIA STATISTICS
+    |--------------------------------------------------------------------------
+    */
+
+    Route::get(
+        '/stats',
+        [ProductMediaController::class, 'statistics']
+    );
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | 5. BULK DELETE
+    |--------------------------------------------------------------------------
+    */
+
+    Route::delete(
+        '/bulk-delete',
+        [ProductMediaController::class, 'bulkDelete']
+    );
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | 6. DOWNLOAD
     |--------------------------------------------------------------------------
     */
 
@@ -65,9 +76,10 @@ Route::prefix('products/{productId}/media')->group(function () {
         [ProductMediaController::class, 'download']
     );
 
+
     /*
     |--------------------------------------------------------------------------
-    | Show
+    | 7. SHOW
     |--------------------------------------------------------------------------
     */
 
@@ -76,9 +88,10 @@ Route::prefix('products/{productId}/media')->group(function () {
         [ProductMediaController::class, 'show']
     );
 
+
     /*
     |--------------------------------------------------------------------------
-    | Update
+    | 8. UPDATE METADATA
     |--------------------------------------------------------------------------
     */
 
@@ -87,9 +100,22 @@ Route::prefix('products/{productId}/media')->group(function () {
         [ProductMediaController::class, 'update']
     );
 
+
     /*
     |--------------------------------------------------------------------------
-    | Delete
+    | 9. REPLACE FILE
+    |--------------------------------------------------------------------------
+    */
+
+    Route::put(
+        '/{id}/replace',
+        [ProductMediaController::class, 'replace']
+    );
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | 10. DELETE SINGLE
     |--------------------------------------------------------------------------
     */
 
@@ -98,9 +124,10 @@ Route::prefix('products/{productId}/media')->group(function () {
         [ProductMediaController::class, 'destroy']
     );
 
+
     /*
     |--------------------------------------------------------------------------
-    | Set Primary
+    | 11. SET PRIMARY
     |--------------------------------------------------------------------------
     */
 
