@@ -7,209 +7,511 @@ use App\Models\Product;
 use App\Models\ProductMedia;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
-use Intervention\Image\ImageManager;
-use Intervention\Image\Drivers\Gd\Driver;
+use Illuminate\Support\Str;
 
 class ProductMediaController extends Controller
 {
-    protected function uploadFile(Request $request, $file, $productId, $isPrimary = false)
+    /**
+     * Display media for a product.
+     *
+     * Supports:
+     * - Search
+     * - File type filter
+     * - Primary media filter
+     * - Sorting
+     * - Pagination
+     *
+     * GET /api/products/{productId}/media
+     */
+    public function index(Request $request, $productId)
     {
-        $allowedImages = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
-        $allowedVideos = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'];
-        $allowedAudio = ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp3', 'audio/aac'];
-        $allowedDocs = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/zip', 'text/plain'];
+        $product = Product::find($productId);
 
-        $allMimes = array_merge($allowedImages, $allowedVideos, $allowedAudio, $allowedDocs);
-        $maxSize = 10 * 1024 * 1024; // 10MB
-
-        if ($file->getSize() > $maxSize) {
-            return ['success' => false, 'message' => 'File size exceeds 10MB limit'];
+        if (!$product) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Product not found.',
+            ], 404);
         }
 
-        $mimeType = $file->getMimeType();
-        if (!in_array($mimeType, $allMimes)) {
-            return ['success' => false, 'message' => 'Unsupported file type: ' . $mimeType];
-        }
+        $request->validate([
+            'search' => 'nullable|string|max:255',
 
-        if (in_array($mimeType, $allowedImages)) {
-            $fileType = 'image';
-        } elseif (in_array($mimeType, $allowedVideos)) {
-            $fileType = 'video';
-        } elseif (in_array($mimeType, $allowedAudio)) {
-            $fileType = 'audio';
-        } else {
-            $fileType = 'document';
-        }
+            'file_type' => [
+                'nullable',
+                'string',
+                'in:image,video,audio,document',
+            ],
 
-        $disk = 'public';
-        $folder = 'products/' . $productId;
-        $fileName = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
-        $filePath = $folder . '/' . $fileName;
+            'is_primary' => [
+                'nullable',
+                'boolean',
+            ],
 
-        Storage::disk($disk)->put($filePath, file_get_contents($file), 'public');
+            'sort_by' => [
+                'nullable',
+                'string',
+                'in:name,size,date',
+            ],
 
-        $thumbnailPath = null;
-        if ($fileType === 'image') {
-            try {
-                $manager = new ImageManager(new Driver());
-                $image = $manager->decodePath(Storage::disk($disk)->path($filePath));
-                $thumbnail = $image->resize(300, 300, function ($constraint) {
-                    $constraint->aspectRatio();
-                    $constraint->upsize();
-                });
-                $thumbnailFileName = 'thumb_' . $fileName;
-                $thumbnailPath = $folder . '/' . $thumbnailFileName;
-                Storage::disk($disk)->put($thumbnailPath, (string) $thumbnail->encode());
-            } catch (\Exception $e) {
-                $thumbnailPath = null;
-            }
-        }
+            'sort_order' => [
+                'nullable',
+                'string',
+                'in:asc,desc',
+            ],
 
-        if ($isPrimary) {
-            ProductMedia::where('product_id', $productId)->update(['is_primary' => false]);
-        }
-
-        $media = ProductMedia::create([
-            'product_id' => $productId,
-            'file_name' => $fileName,
-            'file_path' => 'app/public/' . $filePath,
-            'file_type' => $fileType,
-            'mime_type' => $mimeType,
-            'file_size' => $file->getSize(),
-            'thumbnail_path' => $thumbnailPath ? 'app/public/' . $thumbnailPath : null,
-            'alt_text' => $request->alt_text ?? null,
-            'is_primary' => $isPrimary,
+            'per_page' => [
+                'nullable',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
         ]);
 
-        return [
-            'success' => true,
-            'media' => $media,
-            'url' => Storage::disk($disk)->url($filePath),
-            'thumbnail_url' => $thumbnailPath ? Storage::disk($disk)->url($thumbnailPath) : null,
+        $query = ProductMedia::where('product_id', $productId);
+
+        /*
+        |--------------------------------------------------------------------------
+        | SEARCH
+        |--------------------------------------------------------------------------
+        */
+
+        if ($request->filled('search')) {
+            $search = trim($request->search);
+
+            $query->where(function ($q) use ($search) {
+                $q->where('file_name', 'like', "%{$search}%")
+                    ->orWhere('mime_type', 'like', "%{$search}%")
+                    ->orWhere('file_type', 'like', "%{$search}%");
+            });
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | FILE TYPE FILTER
+        |--------------------------------------------------------------------------
+        */
+
+        if ($request->filled('file_type')) {
+            $query->where(
+                'file_type',
+                $request->file_type
+            );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | PRIMARY MEDIA FILTER
+        |--------------------------------------------------------------------------
+        */
+
+        if ($request->has('is_primary')) {
+            $query->where(
+                'is_primary',
+                filter_var(
+                    $request->is_primary,
+                    FILTER_VALIDATE_BOOLEAN
+                )
+            );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | SORTING
+        |--------------------------------------------------------------------------
+        */
+
+        $sortBy = $request->get('sort_by', 'date');
+
+        $sortOrder = $request->get(
+            'sort_order',
+            'desc'
+        );
+
+        $sortColumns = [
+            'name' => 'file_name',
+            'size' => 'file_size',
+            'date' => 'created_at',
         ];
+
+        $query->orderBy(
+            $sortColumns[$sortBy],
+            $sortOrder
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | PRIMARY MEDIA FIRST
+        |--------------------------------------------------------------------------
+        */
+
+        $query->orderBy(
+            'is_primary',
+            'desc'
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | PAGINATION
+        |--------------------------------------------------------------------------
+        */
+
+        $perPage = $request->get(
+            'per_page',
+            10
+        );
+
+        $media = $query->paginate(
+            $perPage
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | RESPONSE
+        |--------------------------------------------------------------------------
+        */
+
+        return response()->json([
+            'status' => true,
+
+            'message' => 'Media fetched successfully.',
+
+            'data' => $media->items(),
+
+            'filters' => [
+                'search' => $request->search,
+                'file_type' => $request->file_type,
+                'is_primary' => $request->is_primary,
+                'sort_by' => $sortBy,
+                'sort_order' => $sortOrder,
+                'per_page' => (int) $perPage,
+            ],
+
+            'pagination' => [
+                'current_page' => $media->currentPage(),
+
+                'last_page' => $media->lastPage(),
+
+                'per_page' => $media->perPage(),
+
+                'total' => $media->total(),
+
+                'from' => $media->firstItem(),
+
+                'to' => $media->lastItem(),
+
+                'has_more_pages' =>
+                    $media->hasMorePages(),
+
+                'next_page_url' =>
+                    $media->nextPageUrl(),
+
+                'previous_page_url' =>
+                    $media->previousPageUrl(),
+            ],
+        ]);
     }
 
-    public function uploadMultiple(Request $request, $productId)
-    {
+
+    /**
+     * Upload multiple media files.
+     *
+     * POST /api/products/{productId}/media/upload
+     */
+    public function uploadMultiple(
+        Request $request,
+        $productId
+    ) {
+        $product = Product::find($productId);
+
+        if (!$product) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Product not found.',
+            ], 404);
+        }
+
         $request->validate([
-            'files' => 'required|array|min:1|max:20',
-            'files.*' => 'file|max:10240',
-            'alt_text' => 'nullable|string|max:255',
+            'files' => 'required|array',
+            'files.*' => [
+                'required',
+                'file',
+                'max:10240',
+                'mimes:jpg,jpeg,png,gif,webp,svg,mp4,mov,avi,mkv,mp3,wav,pdf,doc,docx,xls,xlsx,ppt,pptx,txt',
+            ],
         ]);
 
-        $product = Product::findOrFail($productId);
-        $uploaded = [];
-        $errors = [];
+        $uploadedFiles = [];
 
-        foreach ($request->file('files') as $index => $file) {
-            $isPrimary = ($index === 0 && !$product->media()->where('is_primary', true)->exists());
-            $result = $this->uploadFile($request, $file, $productId, $isPrimary);
-            if ($result['success']) {
-                $uploaded[] = $result;
+        foreach ($request->file('files') as $file) {
+
+            $originalName =
+                $file->getClientOriginalName();
+
+            $extension =
+                strtolower(
+                    $file->getClientOriginalExtension()
+                );
+
+            $mimeType =
+                $file->getMimeType();
+
+            $fileSize =
+                $file->getSize();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Determine file type
+            |--------------------------------------------------------------------------
+            */
+
+            if (str_starts_with($mimeType, 'image/')) {
+                $fileType = 'image';
+            } elseif (str_starts_with($mimeType, 'video/')) {
+                $fileType = 'video';
+            } elseif (str_starts_with($mimeType, 'audio/')) {
+                $fileType = 'audio';
             } else {
-                $errors[] = $result['message'];
+                $fileType = 'document';
             }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Generate unique filename
+            |--------------------------------------------------------------------------
+            */
+
+            $fileName =
+                Str::uuid() . '.' . $extension;
+
+            /*
+            |--------------------------------------------------------------------------
+            | Store file
+            |--------------------------------------------------------------------------
+            */
+
+            $path = $file->storeAs(
+                "products/{$productId}",
+                $fileName,
+                'public'
+            );
+
+            /*
+            |--------------------------------------------------------------------------
+            | Determine primary media
+            |--------------------------------------------------------------------------
+            */
+
+            $isPrimary =
+                !ProductMedia::where(
+                    'product_id',
+                    $productId
+                )->exists();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Save database record
+            |--------------------------------------------------------------------------
+            */
+
+            $media = ProductMedia::create([
+                'product_id' => $productId,
+
+                'file_name' => $originalName,
+
+                'file_path' =>
+                    'app/public/' . $path,
+
+                'file_type' => $fileType,
+
+                'mime_type' => $mimeType,
+
+                'file_size' => $fileSize,
+
+                'thumbnail_path' => null,
+
+                'alt_text' => null,
+
+                'is_primary' => $isPrimary,
+            ]);
+
+            $uploadedFiles[] = $media;
         }
 
         return response()->json([
             'status' => true,
-            'message' => count($uploaded) . ' file(s) uploaded successfully',
-            'data' => ProductMedia::where('product_id', $productId)->get(),
-            'errors' => $errors,
+
+            'message' =>
+                'Media uploaded successfully.',
+
+            'data' => $uploadedFiles,
         ], 201);
     }
 
-    public function uploadBase64(Request $request, $productId)
-    {
+
+    /**
+     * Upload Base64 media.
+     *
+     * POST /api/products/{productId}/media/base64
+     */
+    public function uploadBase64(
+        Request $request,
+        $productId
+    ) {
+        $product = Product::find($productId);
+
+        if (!$product) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Product not found.',
+            ], 404);
+        }
+
         $request->validate([
-            'base64' => 'required|string',
+            'file' => 'required|string',
             'file_name' => 'required|string|max:255',
-            'mime_type' => 'nullable|string',
-            'alt_text' => 'nullable|string|max:255',
-            'is_primary' => 'boolean',
         ]);
 
-        $product = Product::findOrFail($productId);
+        $base64File =
+            $request->file;
 
-        $base64 = $request->base64;
-        if (preg_match('/^data:([a-zA-Z0-9\/\+]+);base64,/', $base64, $matches)) {
-            $mimeType = $matches[1];
-            $base64 = substr($base64, strpos($base64, ',') + 1);
-        } else {
-            $mimeType = $request->mime_type ?? 'image/jpeg';
+        if (
+            !preg_match(
+                '/^data:(.*?);base64,(.*)$/',
+                $base64File,
+                $matches
+            )
+        ) {
+            return response()->json([
+                'status' => false,
+                'message' =>
+                    'Invalid Base64 file format.',
+            ], 422);
         }
 
-        $disk = 'public';
-        $folder = 'products/' . $productId;
-        $extension = explode('/', $mimeType)[1] ?? 'jpg';
-        if (in_array($extension, ['jpeg', 'jpg'])) {
-            $extension = 'jpg';
-        }
-        $fileName = time() . '_base64_' . uniqid() . '.' . $extension;
-        $filePath = $folder . '/' . $fileName;
+        $mimeType = $matches[1];
 
-        $fileData = base64_decode($base64);
+        $fileData =
+            base64_decode($matches[2]);
+
         if ($fileData === false) {
-            return response()->json(['status' => false, 'message' => 'Invalid base64 data'], 422);
+            return response()->json([
+                'status' => false,
+                'message' =>
+                    'Unable to decode Base64 file.',
+            ], 422);
         }
 
-        Storage::disk($disk)->put($filePath, $fileData, 'public');
+        /*
+        |--------------------------------------------------------------------------
+        | Determine file type
+        |--------------------------------------------------------------------------
+        */
 
-        $fileType = 'image';
-        if (str_starts_with($mimeType, 'video/')) {
+        if (str_starts_with($mimeType, 'image/')) {
+            $fileType = 'image';
+        } elseif (str_starts_with($mimeType, 'video/')) {
             $fileType = 'video';
         } elseif (str_starts_with($mimeType, 'audio/')) {
             $fileType = 'audio';
-        } elseif ($mimeType === 'application/pdf') {
+        } else {
             $fileType = 'document';
         }
 
-        $thumbnailPath = null;
-        if ($fileType === 'image') {
-            try {
-                $manager = new ImageManager(new Driver());
-                $image = $manager->decodePath(Storage::disk($disk)->path($filePath));
-                $thumbnail = $image->resize(300, 300, function ($constraint) {
-                    $constraint->aspectRatio();
-                    $constraint->upsize();
-                });
-                $thumbnailFileName = 'thumb_' . $fileName;
-                $thumbnailPath = $folder . '/' . $thumbnailFileName;
-                Storage::disk($disk)->put($thumbnailPath, (string) $thumbnail->encode());
-            } catch (\Exception $e) {
-                $thumbnailPath = null;
-            }
-        }
+        /*
+        |--------------------------------------------------------------------------
+        | Extension
+        |--------------------------------------------------------------------------
+        */
 
-        if ($request->is_primary) {
-            ProductMedia::where('product_id', $productId)->update(['is_primary' => false]);
-        }
+        $extension =
+            match ($mimeType) {
+                'image/jpeg' => 'jpg',
+                'image/png' => 'png',
+                'image/gif' => 'gif',
+                'image/webp' => 'webp',
+                'video/mp4' => 'mp4',
+                'audio/mpeg' => 'mp3',
+                'application/pdf' => 'pdf',
+                default => 'bin',
+            };
+
+        $fileName =
+            Str::uuid() . '.' . $extension;
+
+        $path =
+            "products/{$productId}/{$fileName}";
+
+        Storage::disk('public')->put(
+            $path,
+            $fileData
+        );
+
+        $isPrimary =
+            !ProductMedia::where(
+                'product_id',
+                $productId
+            )->exists();
 
         $media = ProductMedia::create([
             'product_id' => $productId,
-            'file_name' => $request->file_name,
-            'file_path' => 'app/public/' . $filePath,
-            'file_type' => $fileType,
-            'mime_type' => $mimeType,
-            'file_size' => strlen($fileData),
-            'thumbnail_path' => $thumbnailPath ? 'app/public/' . $thumbnailPath : null,
-            'alt_text' => $request->alt_text,
-            'is_primary' => $request->is_primary ?? false,
+
+            'file_name' =>
+                $request->file_name,
+
+            'file_path' =>
+                'app/public/' . $path,
+
+            'file_type' =>
+                $fileType,
+
+            'mime_type' =>
+                $mimeType,
+
+            'file_size' =>
+                strlen($fileData),
+
+            'thumbnail_path' =>
+                null,
+
+            'alt_text' =>
+                null,
+
+            'is_primary' =>
+                $isPrimary,
         ]);
 
         return response()->json([
             'status' => true,
-            'message' => 'File uploaded via base64 successfully',
+
+            'message' =>
+                'Base64 media uploaded successfully.',
+
             'data' => $media,
-            'url' => Storage::disk($disk)->url($filePath),
-            'thumbnail_url' => $thumbnailPath ? Storage::disk($disk)->url($thumbnailPath) : null,
         ], 201);
     }
 
-    public function index($productId)
-    {
-        $product = Product::findOrFail($productId);
-        $media = ProductMedia::where('product_id', $productId)->orderBy('is_primary', 'desc')->orderBy('created_at', 'desc')->get();
+
+    /**
+     * Show single media.
+     *
+     * GET /api/products/{productId}/media/{id}
+     */
+    public function show(
+        $productId,
+        $id
+    ) {
+        $media = ProductMedia::where(
+            'product_id',
+            $productId
+        )->find($id);
+
+        if (!$media) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Media not found.',
+            ], 404);
+        }
 
         return response()->json([
             'status' => true,
@@ -217,72 +519,327 @@ class ProductMediaController extends Controller
         ]);
     }
 
-    public function show($productId, $id)
-    {
-        $media = ProductMedia::where('product_id', $productId)->where('id', $id)->first();
+
+    /**
+     * Download media.
+     *
+     * GET /api/products/{productId}/media/{id}/download
+     */
+    public function download(
+        $productId,
+        $id
+    ) {
+        /*
+        |--------------------------------------------------------------------------
+        | Find media
+        |--------------------------------------------------------------------------
+        */
+
+        $media = ProductMedia::where(
+            'product_id',
+            $productId
+        )->find($id);
+
         if (!$media) {
-            return response()->json(['status' => false, 'message' => 'Media not found'], 404);
+            return response()->json([
+                'status' => false,
+                'message' => 'Media not found.',
+            ], 404);
         }
-        return response()->json(['status' => true, 'data' => $media]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Convert database path to storage path
+        |--------------------------------------------------------------------------
+        */
+
+        $filePath = $media->file_path;
+
+        if (
+            str_starts_with(
+                $filePath,
+                'app/public/'
+            )
+        ) {
+            $filePath = substr(
+                $filePath,
+                strlen('app/public/')
+            );
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Storage disk
+        |--------------------------------------------------------------------------
+        */
+
+        $disk =
+            Storage::disk('public');
+
+        /*
+        |--------------------------------------------------------------------------
+        | Check physical file
+        |--------------------------------------------------------------------------
+        */
+
+        if (!$disk->exists($filePath)) {
+            return response()->json([
+                'status' => false,
+                'message' =>
+                    'Media file not found on storage.',
+            ], 404);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Original filename
+        |--------------------------------------------------------------------------
+        */
+
+        $downloadName =
+            $media->file_name;
+
+        if (!$downloadName) {
+            $downloadName =
+                basename($filePath);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | MIME type
+        |--------------------------------------------------------------------------
+        */
+
+        $mimeType =
+            $media->mime_type;
+
+        if (!$mimeType) {
+            $mimeType =
+                $disk->mimeType($filePath);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Download
+        |--------------------------------------------------------------------------
+        */
+
+        return $disk->download(
+            $filePath,
+            $downloadName,
+            [
+                'Content-Type' =>
+                    $mimeType,
+
+                'Content-Disposition' =>
+                    'attachment; filename="' .
+                    addslashes($downloadName) .
+                    '"',
+            ]
+        );
     }
 
-    public function update(Request $request, $productId, $id)
-    {
-        $media = ProductMedia::where('product_id', $productId)->where('id', $id)->first();
+
+    /**
+     * Update media.
+     *
+     * PUT /api/products/{productId}/media/{id}
+     */
+    public function update(
+        Request $request,
+        $productId,
+        $id
+    ) {
+        $media = ProductMedia::where(
+            'product_id',
+            $productId
+        )->find($id);
+
         if (!$media) {
-            return response()->json(['status' => false, 'message' => 'Media not found'], 404);
+            return response()->json([
+                'status' => false,
+                'message' => 'Media not found.',
+            ], 404);
         }
 
         $request->validate([
-            'alt_text' => 'nullable|string|max:255',
-            'is_primary' => 'boolean',
+            'alt_text' =>
+                'nullable|string|max:255',
+
+            'is_primary' =>
+                'nullable|boolean',
         ]);
 
-        if ($request->has('is_primary') && $request->is_primary) {
-            ProductMedia::where('product_id', $productId)->update(['is_primary' => false]);
+        if ($request->has('alt_text')) {
+            $media->alt_text =
+                $request->alt_text;
         }
 
-        $media->update($request->only(['alt_text', 'is_primary']));
+        /*
+        |--------------------------------------------------------------------------
+        | Set Primary
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            $request->has('is_primary') &&
+            $request->is_primary
+        ) {
+            ProductMedia::where(
+                'product_id',
+                $productId
+            )
+                ->where('id', '!=', $media->id)
+                ->update([
+                    'is_primary' => false,
+                ]);
+
+            $media->is_primary = true;
+        }
+
+        $media->save();
 
         return response()->json([
             'status' => true,
-            'message' => 'Media updated successfully',
+
+            'message' =>
+                'Media updated successfully.',
+
             'data' => $media,
         ]);
     }
 
-    public function destroy($productId, $id)
-    {
-        $media = ProductMedia::where('product_id', $productId)->where('id', $id)->first();
+
+    /**
+     * Delete media.
+     *
+     * DELETE /api/products/{productId}/media/{id}
+     */
+    public function destroy(
+        $productId,
+        $id
+    ) {
+        $media = ProductMedia::where(
+            'product_id',
+            $productId
+        )->find($id);
+
         if (!$media) {
-            return response()->json(['status' => false, 'message' => 'Media not found'], 404);
+            return response()->json([
+                'status' => false,
+                'message' => 'Media not found.',
+            ], 404);
         }
 
-        Storage::disk('public')->delete(str_replace('app/public/', '', $media->file_path));
-        if ($media->thumbnail_path) {
-            Storage::disk('public')->delete(str_replace('app/public/', '', $media->thumbnail_path));
+        /*
+        |--------------------------------------------------------------------------
+        | Delete physical file
+        |--------------------------------------------------------------------------
+        */
+
+        $filePath =
+            $media->file_path;
+
+        if (
+            str_starts_with(
+                $filePath,
+                'app/public/'
+            )
+        ) {
+            $filePath = substr(
+                $filePath,
+                strlen('app/public/')
+            );
         }
+
+        if (
+            Storage::disk('public')
+                ->exists($filePath)
+        ) {
+            Storage::disk('public')
+                ->delete($filePath);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Delete database record
+        |--------------------------------------------------------------------------
+        */
+
+        $wasPrimary =
+            $media->is_primary;
 
         $media->delete();
 
+        /*
+        |--------------------------------------------------------------------------
+        | Assign another media as primary
+        |--------------------------------------------------------------------------
+        */
+
+        if ($wasPrimary) {
+            $nextMedia =
+                ProductMedia::where(
+                    'product_id',
+                    $productId
+                )
+                ->latest()
+                ->first();
+
+            if ($nextMedia) {
+                $nextMedia->update([
+                    'is_primary' => true,
+                ]);
+            }
+        }
+
         return response()->json([
             'status' => true,
-            'message' => 'Media deleted successfully',
+
+            'message' =>
+                'Media deleted successfully.',
         ]);
     }
 
-    public function setPrimary($productId, $id)
-    {
-        ProductMedia::where('product_id', $productId)->update(['is_primary' => false]);
-        $media = ProductMedia::where('product_id', $productId)->where('id', $id)->first();
+
+    /**
+     * Set media as primary.
+     *
+     * POST /api/products/{productId}/media/{id}/primary
+     */
+    public function setPrimary(
+        $productId,
+        $id
+    ) {
+        $media = ProductMedia::where(
+            'product_id',
+            $productId
+        )->find($id);
+
         if (!$media) {
-            return response()->json(['status' => false, 'message' => 'Media not found'], 404);
+            return response()->json([
+                'status' => false,
+                'message' => 'Media not found.',
+            ], 404);
         }
-        $media->update(['is_primary' => true]);
+
+        ProductMedia::where(
+            'product_id',
+            $productId
+        )->update([
+            'is_primary' => false,
+        ]);
+
+        $media->update([
+            'is_primary' => true,
+        ]);
 
         return response()->json([
             'status' => true,
-            'message' => 'Primary media updated',
+
+            'message' =>
+                'Primary media updated successfully.',
+
             'data' => $media,
         ]);
     }

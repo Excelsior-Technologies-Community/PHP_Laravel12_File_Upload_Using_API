@@ -368,21 +368,33 @@ class ProductController extends Controller
         }
 
         $thumbnailPath = null;
-        if ($fileType === 'image') {
-            try {
-                $manager = new ImageManager(new Driver());
-                $image = $manager->decodePath(Storage::disk($disk)->path($filePath));
-                $thumbnail = $image->resize(300, 300, function ($constraint) {
-                    $constraint->aspectRatio();
-                    $constraint->upsize();
-                });
-                $thumbnailFileName = 'thumb_' . $fileName;
-                $thumbnailPath = $folder . '/' . $thumbnailFileName;
-                Storage::disk($disk)->put($thumbnailPath, (string) $thumbnail->encode());
-            } catch (\Exception $e) {
-                $thumbnailPath = null;
-            }
-        }
+if ($fileType === 'image') {
+    try {
+        $manager = new ImageManager(new Driver());
+
+        $image = $manager->read(
+            Storage::disk($disk)->path($filePath)
+        );
+
+        // Keep aspect ratio and prevent enlarging small images
+        $thumbnail = $image->scaleDown(
+            width: 300,
+            height: 300
+        );
+
+        $thumbnailFileName = 'thumb_' . $fileName;
+
+        $thumbnailPath = $folder . '/' . $thumbnailFileName;
+
+        Storage::disk($disk)->put(
+            $thumbnailPath,
+            (string) $thumbnail->encode()
+        );
+
+    } catch (\Throwable $e) {
+        $thumbnailPath = null;
+    }
+}
 
         if ($isPrimary) {
             ProductMedia::where('product_id', $productId)->update(['is_primary' => false]);
@@ -438,21 +450,33 @@ class ProductController extends Controller
         }
 
         $thumbnailPath = null;
-        if ($fileType === 'image') {
-            try {
-                $manager = new ImageManager(new Driver());
-                $image = $manager->decodePath(Storage::disk($disk)->path($filePath));
-                $thumbnail = $image->resize(300, 300, function ($constraint) {
-                    $constraint->aspectRatio();
-                    $constraint->upsize();
-                });
-                $thumbnailFileName = 'thumb_' . $fileName;
-                $thumbnailPath = $folder . '/' . $thumbnailFileName;
-                Storage::disk($disk)->put($thumbnailPath, (string) $thumbnail->encode());
-            } catch (\Exception $e) {
-                $thumbnailPath = null;
-            }
-        }
+if ($fileType === 'image') {
+    try {
+        $manager = new ImageManager(new Driver());
+
+        $image = $manager->read(
+            Storage::disk($disk)->path($filePath)
+        );
+
+        // Keep aspect ratio and don't enlarge smaller images
+        $thumbnail = $image->scaleDown(
+            width: 300,
+            height: 300
+        );
+
+        $thumbnailFileName = 'thumb_' . $fileName;
+
+        $thumbnailPath = $folder . '/' . $thumbnailFileName;
+
+        Storage::disk($disk)->put(
+            $thumbnailPath,
+            (string) $thumbnail->encode()
+        );
+
+    } catch (\Throwable $e) {
+        $thumbnailPath = null;
+    }
+}
 
         if ($isPrimary) {
             ProductMedia::where('product_id', $productId)->update(['is_primary' => false]);
